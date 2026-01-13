@@ -1,0 +1,170 @@
+-- =============================================
+-- PART 0: FOUNDATION & CONFIGURATION
+-- =============================================
+
+-- 1. Enable UUID extension (MUST BE FIRST)
+-- This allows us to generate unique IDs for the Audit Logs and Line Items
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- 2. ENUMS (Defining the Rules)
+CREATE TYPE region_type AS ENUM ('North', 'South', 'East', 'West', 'Central', 'International');
+CREATE TYPE opp_stage AS ENUM ('Prospecting', 'Qualification', 'Needs Analysis', 'Proposal', 'Negotiation', 'Closed Won', 'Closed Lost');
+CREATE TYPE quote_status AS ENUM ('Draft', 'Review', 'Approved', 'Sent', 'Accepted', 'Rejected');
+CREATE TYPE order_status AS ENUM ('Pending', 'Processing', 'Fulfilled', 'Billed', 'Cancelled');
+CREATE TYPE invoice_status AS ENUM ('Pending', 'Paid', 'Overdue', 'Cancelled');
+
+-- =============================================
+-- PART 1: THE CORE ENTITIES (Hierarchy Level 1)
+-- =============================================
+
+-- 3. TERRITORIES
+CREATE TABLE territories (
+    territory_id VARCHAR(50) PRIMARY KEY,
+    region region_type NOT NULL,
+    manager_name VARCHAR(100),
+    metadata JSONB DEFAULT '{}'::jsonb
+);
+COMMENT ON TABLE territories IS 'Geographic sales divisions.';
+
+-- 4. SALES REPS (Depends on Territories)
+CREATE TABLE sales_reps (
+    sales_rep_id VARCHAR(50) PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    email VARCHAR(150) UNIQUE,
+    territory_id VARCHAR(50) REFERENCES territories(territory_id),
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 5. CUSTOMERS (Contacts)
+CREATE TABLE customers (
+    customer_id VARCHAR(50) PRIMARY KEY,
+    name VARCHAR(150),
+    email VARCHAR(150),
+    phone VARCHAR(50),
+    country VARCHAR(100),
+    metadata JSONB DEFAULT '{}'::jsonb
+);
+
+-- 6. ACCOUNTS (Companies - Depends on Customers)
+CREATE TABLE accounts (
+    account_id VARCHAR(50) PRIMARY KEY,
+    account_name VARCHAR(200) NOT NULL,
+    primary_customer_id VARCHAR(50) REFERENCES customers(customer_id),
+    account_type VARCHAR(50),
+    region region_type,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    metadata JSONB DEFAULT '{}'::jsonb
+);
+CREATE INDEX idx_account_name ON accounts USING btree (account_name);
+
+-- 7. PRODUCTS
+CREATE TABLE products (
+    product_id VARCHAR(50) PRIMARY KEY,
+    product_name VARCHAR(200) NOT NULL,
+    category VARCHAR(100),
+    list_price NUMERIC(15, 2) NOT NULL CHECK (list_price >= 0),
+    description TEXT
+);
+
+-- =============================================
+-- PART 2: THE TRANSACTIONAL LAYER (Hierarchy Level 2)
+-- =============================================
+
+-- 8. OPPORTUNITIES (Depends on Accounts)
+CREATE TABLE opportunities (
+    opportunity_id VARCHAR(50) PRIMARY KEY,
+    account_id VARCHAR(50) REFERENCES accounts(account_id),
+    stage opp_stage NOT NULL,
+    amount NUMERIC(15, 2),
+    close_date DATE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    win_probability INTEGER CHECK (win_probability BETWEEN 0 AND 100),
+    metadata JSONB DEFAULT '{}'::jsonb
+);
+COMMENT ON COLUMN opportunities.amount IS 'The estimated value of the deal before final quote.';
+
+-- 9. QUOTES (Depends on Opportunities)
+CREATE TABLE quotes (
+    quote_id VARCHAR(50) PRIMARY KEY,
+    opportunity_id VARCHAR(50) REFERENCES opportunities(opportunity_id),
+    quote_amount NUMERIC(15, 2) NOT NULL,
+    status quote_status DEFAULT 'Draft',
+    created_date DATE DEFAULT CURRENT_DATE,
+    expiration_date DATE,
+    metadata JSONB DEFAULT '{}'::jsonb
+);
+
+-- 10. SALES ORDERS (Depends on Opportunities)
+CREATE TABLE sales_orders (
+    sales_order_id VARCHAR(50) PRIMARY KEY,
+    opportunity_id VARCHAR(50) REFERENCES opportunities(opportunity_id),
+    order_date DATE NOT NULL,
+    total_amount NUMERIC(15, 2) NOT NULL,
+    status order_status DEFAULT 'Pending',
+    metadata JSONB DEFAULT '{}'::jsonb
+);
+
+-- 11. INVOICES (Depends on Sales Orders)
+CREATE TABLE invoices (
+    invoice_id VARCHAR(50) PRIMARY KEY,
+    sales_order_id VARCHAR(50) REFERENCES sales_orders(sales_order_id),
+    invoice_date DATE NOT NULL,
+    due_date DATE,
+    amount NUMERIC(15, 2) NOT NULL,
+    payment_status invoice_status DEFAULT 'Pending',
+    balance_due NUMERIC(15, 2)
+);
+
+-- 12. SALES_LINE_ITEMS (Depends on Orders and Products)
+CREATE TABLE sales_line_items (
+    line_item_id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    sales_order_id VARCHAR(50) REFERENCES sales_orders(sales_order_id),
+    product_id VARCHAR(50) REFERENCES products(product_id),
+    quantity INTEGER NOT NULL CHECK (quantity > 0),
+    unit_price NUMERIC(15, 2) NOT NULL,
+    total_price NUMERIC(15, 2) GENERATED ALWAYS AS (quantity * unit_price) STORED
+);
+
+-- =============================================
+-- PART 3: THE AGENT TRUST LAYER (The Brain)
+-- =============================================
+
+-- 13. DOCUMENTS (Evidence - Depends on Opportunities)
+CREATE TABLE documents (
+    document_id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    file_name VARCHAR(255) NOT NULL,
+    file_type VARCHAR(50),
+    upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    content_summary TEXT,
+    raw_text_content TEXT,
+    related_opportunity_id VARCHAR(50) REFERENCES opportunities(opportunity_id),
+    metadata JSONB DEFAULT '{}'::jsonb
+);
+COMMENT ON TABLE documents IS 'Stores metadata and OCR content of uploaded PDFs/Emails for the AI to reference.';
+
+-- 14. APPROVAL_REQUESTS (Workflow - Depends on Quotes)
+CREATE TABLE approval_requests (
+    approval_id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    quote_id VARCHAR(50) REFERENCES quotes(quote_id),
+    approver_role VARCHAR(50),
+    trigger_reason VARCHAR(200),
+    status VARCHAR(20) DEFAULT 'Pending',
+    approver_comments TEXT,
+    requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    responded_at TIMESTAMP
+);
+COMMENT ON TABLE approval_requests IS 'Tracks deal desk approvals for discounts or exceptions.';
+
+-- 15. AGENT_AUDIT_LOGS (Reasoning - No Foreign Keys, Generic)
+CREATE TABLE agent_audit_logs (
+    log_id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    agent_action VARCHAR(100),
+    related_entity_id VARCHAR(50),
+    old_value TEXT,
+    new_value TEXT,
+    ai_reasoning TEXT,
+    confidence_score NUMERIC(3,2),
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+COMMENT ON TABLE agent_audit_logs IS 'The "Black Box Recorder". Stores why the AI made a decision.';

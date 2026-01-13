@@ -32,51 +32,45 @@ def load_table(csv_name, table_name, column_mapping, unique_id_col):
 
     print(f"Processing {csv_name} -> {table_name}...")
     
-    # Read CSV
+ 
     df = pd.read_csv(file_path)
     
-    # Prepare DataFrame for SQL
+  
     sql_data = pd.DataFrame()
     
-    # 1. Map Core Columns
+
     for csv_col, sql_col in column_mapping.items():
         if csv_col in df.columns:
             sql_data[sql_col] = df[csv_col]
         else:
             print(f"  Warning: Column {csv_col} missing in CSV")
 
-    # 2. Pack everything else into 'metadata' JSONB
-    # Find columns in CSV that are NOT in our mapping
+ 
     mapped_csv_cols = list(column_mapping.keys())
     extra_cols = [c for c in df.columns if c not in mapped_csv_cols]
     
     if extra_cols:
         print(f"  Packing extra columns into metadata: {extra_cols}")
-        # FIX: Replace NaN with None (which becomes JSON null) to prevent errors
+       
         clean_extras = df[extra_cols].where(pd.notnull(df[extra_cols]), None)
         metadata_list = clean_extras.to_dict(orient='records')
         sql_data['metadata'] = [json.dumps(m) for m in metadata_list]
     else:
         sql_data['metadata'] = '{}'
 
-    # 3. Data Cleaning (Specific to your Schema Enums)
-    # Ensure Dates are strings or nulls
+
     for col in sql_data.columns:
         if 'date' in col.lower():
             sql_data[col] = pd.to_datetime(sql_data[col], errors='coerce')
 
-    # 4. Insert into Postgres
     try:
-        # We use 'append' but strictly, we should be careful of duplicates.
-        # This simple loader assumes an empty DB or unique IDs.
+      
         sql_data.to_sql(table_name, engine, if_exists='append', index=False, method='multi', chunksize=1000)
         print(f"  Success! Loaded {len(sql_data)} rows into {table_name}.")
     except Exception as e:
         print(f"  ERROR loading {table_name}: {e}")
 
-# ==========================================
-# EXECUTION ORDER (Strictly enforced)
-# ==========================================
+
 
 # 1. TERRITORIES
 """load_table(
@@ -130,7 +124,7 @@ load_table(
         'ProductID': 'product_id',
         'ProductName': 'product_name',
         'Category': 'category',
-        'Price': 'list_price', # Note: CSV says Price, DB says list_price
+        'Price': 'list_price', # CSV - Price, DB - list_price
     }, 'product_id'
 )
 
@@ -181,9 +175,9 @@ load_table(
     }, 'invoice_id' 
 )
 
-print("=========================================")
+print(":)")
 print("DATA LOAD COMPLETE")
-print("=========================================")
+
 
 
 
